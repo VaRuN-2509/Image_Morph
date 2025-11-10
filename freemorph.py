@@ -162,7 +162,7 @@ if __name__ == "__main__":
     injection_noise = torch.randn((1, 4, 96, 96), device=device, dtype=dtype_weight)
 
     json_output = []
-    dataloader = Dataloader("sft.jsonl")
+    dataloader = Dataloader("/home/alduin/workspace/varun/sft.jsonl")
     for i,all_images in enumerate(dataloader.read()):
         image_0 = load_im_from_path(all_images['input_image_url'])
         image_1 = load_im_from_path(all_images['output_image_url'])
