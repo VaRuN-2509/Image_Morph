@@ -6,6 +6,8 @@ from PIL import Image
 import requests
 from io import BytesIO
 from torchvision import transforms
+import matplotlib.pyplot as plt
+
 
 
 def center_crop(im: Image) -> Image:
@@ -37,7 +39,7 @@ def load_im_from_path(path, size=(768, 768)):
         print(f"⚠️ Failed to load image from {path}: {e}")
         # return a dummy black image to avoid crashing the pipeline
         return torch.zeros((3, size[0], size[1]))
-
+   
     # Resize and center-crop
     width, height = image.size
     min_dim = min(width, height)
@@ -50,10 +52,12 @@ def load_im_from_path(path, size=(768, 768)):
 
     # Convert to tensor and normalize for diffusion model
     transform = transforms.Compose([
-        transforms.ToTensor(),                      # (H, W, C) → (C, H, W)
-        transforms.Normalize([0.5], [0.5])          # scale to [-1, 1]
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5])                                      # (H, W, C) → (C, H, W)         # scale to
     ])
-    image_tensor = transform(image).unsqueeze(0)    # add batch dimension
+    
+    image_tensor = transform(image).unsqueeze(0) 
+    # add batch dimension
     return image_tensor
 
 

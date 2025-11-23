@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import torch
 import json
@@ -126,10 +127,7 @@ def aid_forward(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--json_path', required=True, type=str, help="path to the captioned json")
-    args, extras = parser.parse_known_args()
+  
     
     set_seed(42)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -137,7 +135,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
     torch.set_grad_enabled(False)
-    model_name = "stabilityai/stable-diffusion-2-1"
+    model_name = "runwayml/stable-diffusion-v1-5"
     image_resolution = 768
     dtype_weight = torch.float16
     steps = 15
@@ -148,12 +146,20 @@ if __name__ == "__main__":
     # class_name = args.class_name
     # exp_name = args.class_name
     # save_dir = f"./eval_results/{exp_name}/freemorph"
-    save_dir = "./eval_results/freemorph"
-    os.makedirs(save_dir, exist_ok=True)
+    
+   
     device = accelerater.device
     vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae").to(device, dtype_weight)
     text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder="text_encoder").to(device)
-    tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder="tokenizer")
+    tokenizer = CLIPTokenizer.from_pretrained(
+        model_name,
+        subfolder="tokenizer",
+        use_fast=False,
+        chat_template=None,
+        trust_remote_code=False,
+        tokenizer_config_file=None,
+        skip_special_tokens=False
+    )
     unet = UNet2DConditionModel.from_pretrained(model_name, subfolder="unet").to(device, dtype_weight)
     forward_scheduler = DDIMScheduler.from_pretrained(model_name, subfolder="scheduler")
     forward_scheduler.set_timesteps(steps)
@@ -161,105 +167,134 @@ if __name__ == "__main__":
     invert_scheduler.set_timesteps(steps)
     injection_noise = torch.randn((1, 4, 96, 96), device=device, dtype=dtype_weight)
 
+    input_dir = Path("/home/shifu/workspace/varun/split_edits_by_instruction")
     json_output = []
-    dataloader = Dataloader("/home/alduin/workspace/varun/sft.jsonl")
-    for i,all_images in enumerate(dataloader.read()):
-        image_0 = load_im_from_path(all_images['input_image_url'])
-        image_1 = load_im_from_path(all_images['output_image_url'])
-        prompts = all_images['prompts']
-        json_output.append(
-            {
-                "exp_id": i,
-                "edit_prompt": all_images['edit_prompt'],
-                "image_paths": [
-                    all_images['input_image_url'],
-                    all_images['output_image_url'],
-                ],
-                "prompts": prompts,
-            }
-        )
-        exp_id = i
-        latent_x_list = []
-        text_input_con_list = []
-        text_input_uncond_list = []
-        original_images = []
-        for img_idx in range(2):
-            image = image_0 if img_idx == 0 else image_1
-            original_images.append(image)
-            input_ids = tokenizer(
-                [prompts[img_idx], ""],
-                return_tensors="pt",
-                truncation=True,
-                padding="max_length",
-            ).input_ids.to(device)
-            text_input = text_encoder(input_ids).last_hidden_state.to(device, dtype_weight)
-            text_input_con, text_input_uncond = text_input.chunk(2, dim=0)
-            text_input_con_list.append(text_input_con)
-            text_input_uncond_list.append(text_input_uncond)
-            latent_x = vae.encode(image).latent_dist.sample() * vae.config.scaling_factor
-            latent_x_list.append(latent_x)
+    
+    for json_file in input_dir.rglob("*.json"):
+        if json_file.is_file() and json_file.suffix == ".json":   # optional filter
+            file_name = json_file.stem
+            save_dir = f"./eval_results/freemorph/{file_name}"
+            json_path = f"output_log/edit_{file_name}"
 
-        interpolation_size = 7
-        coef_attn = generate_beta_tensor(interpolation_size, alpha=20, beta=20)
-        latent_x = spherical_interpolation(latent_x_list[0], latent_x_list[1], interpolation_size).squeeze(0)
-        invert_timesteps = invert_scheduler.timesteps - 1
-        invert_timesteps = invert_timesteps[: int(steps * edit_strength)]
-        text_input_con_all = linear_interpolation(
-            text_input_con_list[0], text_input_con_list[1], interpolation_size
-        ).squeeze(0)
-        text_input_uncond_all = linear_interpolation(
-            text_input_uncond_list[0], text_input_uncond_list[1], interpolation_size
-        ).squeeze(0)
-        reverted_latent = aid_inversion(
-            latent=latent_x,
-            timesteps=invert_timesteps,
-            text_input_con=text_input_con_all,
-            text_input_uncon=text_input_uncond_all,
-            coef_cross_attn=coef_attn,
-            coef_self_attn=coef_attn,
-        )
-        thresholds = [48] + [44] + [42] * 2 + [42] + [42] * 2 + [44] + [48]
-        new_input_latents_list = []
-        for k in range(1, 7 - 1):
-            new_input_latent = fourier_filter(
-                x=reverted_latent[k].unsqueeze(0),
-                y=injection_noise.clone(),
-                threshold=int(thresholds[k]),
+        print("Processing file:", json_file)
+        dataloader = Dataloader(str(json_file))
+        print(json_file)
+
+        if os.path.exists(save_dir) and len(os.listdir(save_dir)) > 0:
+                print(f"Skipping directory — already processed ({save_dir})")
+                continue
+        
+        dataloader = Dataloader(f"{json_file}")
+        
+        for i,all_images in enumerate(dataloader.read()):
+            exp_id = i
+            out_dir = f"{save_dir}/{exp_id}"
+
+
+            os.makedirs(out_dir, exist_ok=True)
+            print(f"Processing entry {exp_id}...")
+            image_0 = load_im_from_path(all_images['input_image_url'])
+            image_1 = load_im_from_path(all_images['output_image_url'])
+            vae_dtype = next(vae.parameters()).dtype
+            vae_device = next(vae.parameters()).device
+
+            image_0 = image_0.to(device=vae_device, dtype=vae_dtype)
+            image_1 = image_1.to(device=vae_device, dtype=vae_dtype)
+
+            prompts = all_images['prompts']
+            json_output.append(
+                {
+                    "exp_id": i,
+                    "edit_prompt": all_images['edit_prompt'],
+                    "image_paths": [
+                        all_images['input_image_url'],
+                        all_images['output_image_url'],
+                    ],
+                    "prompts": prompts,
+                }
             )
-            new_input_latents_list.append(new_input_latent.clone())
-        latent = torch.cat(
-            [reverted_latent[0].unsqueeze(0)] + new_input_latents_list + [reverted_latent[-1].unsqueeze(0)]
-        )
-        forward_timesteps = forward_scheduler.timesteps - 1
-        forward_timesteps = forward_timesteps[steps - int(steps * edit_strength) :]
-        coef_attn = generate_beta_tensor(interpolation_size, alpha=20, beta=20)
-        morphing_latent = aid_forward(
-            forward_timesteps,
-            latent=latent,
-            text_input_con=text_input_con_all,
-            text_input_uncond=text_input_uncond_all,
-            coef_cross_attn=coef_attn,
-            coef_self_attn=coef_attn,
-            guidance_scale=guidance_scale,
-        )
-        images = []
-        for x in morphing_latent:
-            x = vae.decode(x.unsqueeze(0) / vae.config.scaling_factor).sample
-            x = (x / 2 + 0.5).clamp(0, 1)
-            x = x.detach().to(torch.float).cpu()
-            images.append(x)
-        images[0] = (original_images[0] / 2 + 0.5).detach().to(torch.float).cpu()
-        images[-1] = (original_images[1] / 2 + 0.5).detach().to(torch.float).cpu()
-        out_dir = f"{save_dir}/{exp_id}"
-        os.makedirs(out_dir, exist_ok=True)  # ✅ ensures directory exists
-        save_image(torch.cat(images), f"{out_dir}/{exp_id}.png")
+            exp_id = i
+            latent_x_list = []
+            text_input_con_list = []
+            text_input_uncond_list = []
+            original_images = []
+            for img_idx in range(2):
+                image = image_0 if img_idx == 0 else image_1
+                original_images.append(image)
+                input_ids = tokenizer(
+                    [prompts[img_idx], ""],
+                    return_tensors="pt",
+                    truncation=True,
+                    padding="max_length",
+                ).input_ids.to(device)
+                text_input = text_encoder(input_ids).last_hidden_state.to(device, dtype_weight)
+                text_input_con, text_input_uncond = text_input.chunk(2, dim=0)
+                text_input_con_list.append(text_input_con)
+                text_input_uncond_list.append(text_input_uncond)
+                latent_x = vae.encode(image).latent_dist.sample() * vae.config.scaling_factor
+                latent_x_list.append(latent_x)
 
-        os.makedirs(args.json_path, exist_ok=True)
-        with open(f"{args.json_path}/data_loaded.json", "w") as f:
-            for item in json_output:
-                f.write(json.dumps(item) + "\n")
+            interpolation_size = 8
+            coef_attn = generate_beta_tensor(interpolation_size, alpha=20, beta=20)
+            latent_x = spherical_interpolation(latent_x_list[0], latent_x_list[1], interpolation_size).squeeze(0)
+            invert_timesteps = invert_scheduler.timesteps - 1
+            invert_timesteps = invert_timesteps[: int(steps * edit_strength)]
+            text_input_con_all = linear_interpolation(
+                text_input_con_list[0], text_input_con_list[1], interpolation_size
+            ).squeeze(0)
+            text_input_uncond_all = linear_interpolation(
+                text_input_uncond_list[0], text_input_uncond_list[1], interpolation_size
+            ).squeeze(0)
+            reverted_latent = aid_inversion(
+                latent=latent_x,
+                timesteps=invert_timesteps,
+                text_input_con=text_input_con_all,
+                text_input_uncon=text_input_uncond_all,
+                coef_cross_attn=coef_attn,
+                coef_self_attn=coef_attn,
+            )
+            thresholds = [48] + [44] + [42] * 2 + [42] + [42] * 2 + [44] + [48]
+            new_input_latents_list = []
+            for k in range(1, 8 - 1):
+                new_input_latent = fourier_filter(
+                    x=reverted_latent[k].unsqueeze(0),
+                    y=injection_noise.clone(),
+                    threshold=int(thresholds[k]),
+                )
+                new_input_latents_list.append(new_input_latent.clone())
+            latent = torch.cat(
+                [reverted_latent[0].unsqueeze(0)] + new_input_latents_list + [reverted_latent[-1].unsqueeze(0)]
+            )
+            forward_timesteps = forward_scheduler.timesteps - 1
+            forward_timesteps = forward_timesteps[steps - int(steps * edit_strength) :]
+            coef_attn = generate_beta_tensor(interpolation_size, alpha=20, beta=20)
+            morphing_latent = aid_forward(
+                forward_timesteps,
+                latent=latent,
+                text_input_con=text_input_con_all,
+                text_input_uncond=text_input_uncond_all,
+                coef_cross_attn=coef_attn,
+                coef_self_attn=coef_attn,
+                guidance_scale=guidance_scale,
+            )
+            images = []
+            for x in morphing_latent:
+                x = vae.decode(x.unsqueeze(0) / vae.config.scaling_factor).sample
+                x = (x / 2 + 0.5).clamp(0, 1)
+                x = x.detach().to(torch.float).cpu()
+                images.append(x)
+            images[0] = (original_images[0] / 2 + 0.5).detach().to(torch.float).cpu()
+            images[-1] = (original_images[1] / 2 + 0.5).detach().to(torch.float).cpu()
+            out_dir = f"{save_dir}/{exp_id}"
+            os.makedirs(out_dir, exist_ok=True)  # ✅ ensures directory exists
+            save_image(torch.cat(images), f"{out_dir}/{exp_id}.png")
 
-        for i, img in enumerate(images):
-            save_path = os.path.join(out_dir, f"{exp_id}_s{i}.png")
-            save_image(img, save_path)
-            print(f"✅ Saved: {save_path}")
+            os.makedirs(json_path, exist_ok=True)
+            with open(f"{json_path}/data_loaded.json", "w") as f:
+                for item in json_output:
+                    f.write(json.dumps(item) + "\n")
+
+            for i, img in enumerate(images):
+                save_path = os.path.join(out_dir, f"{exp_id}_s{i}.png")
+                save_image(img, save_path)
+                print(f"✅ Saved: {save_path}")
