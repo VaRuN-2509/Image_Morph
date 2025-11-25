@@ -6,7 +6,7 @@ from PIL import Image
 import requests
 from io import BytesIO
 from torchvision import transforms
-import matplotlib.pyplot as plt
+
 
 
 

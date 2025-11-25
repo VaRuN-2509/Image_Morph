@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import torch
+import re
 import json
 import tqdm
 from dataloader import Dataloader
@@ -128,7 +129,7 @@ def aid_forward(
 
 if __name__ == "__main__":
   
-    
+    print("hey im inside main")
     set_seed(42)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -167,18 +168,31 @@ if __name__ == "__main__":
     invert_scheduler.set_timesteps(steps)
     injection_noise = torch.randn((1, 4, 96, 96), device=device, dtype=dtype_weight)
 
-    input_dir = Path("/home/shifu/workspace/varun/split_edits_by_instruction")
+    input_dir = Path("./edits_2")
+    print("EXISTS?", input_dir.exists())
+    print("loaded input_dir")
     json_output = []
+
+    files = list(input_dir.rglob("*.json"))
+    print(files)
+
+    def extract_prefix(file):
+        m = re.match(r"(\d+)_", file.name)
+        return int(m.group(1)) if m else 0
+
+    files = sorted(files, key=extract_prefix)
     
-    for json_file in input_dir.rglob("*.json"):
+    for json_file in files:
         if json_file.is_file() and json_file.suffix == ".json":   # optional filter
             file_name = json_file.stem
-            save_dir = f"./eval_results/freemorph/{file_name}"
-            json_path = f"output_log/edit_{file_name}"
+            print(f"processing file name : {file_name}")
+            save_dir = f"/root/data/{file_name}"
+            json_path = f"/root/data/output_log/edit_{file_name}"
 
         print("Processing file:", json_file)
         dataloader = Dataloader(str(json_file))
         print(json_file)
+        print("Files:", list(input_dir.rglob("*")))
 
         if os.path.exists(save_dir) and len(os.listdir(save_dir)) > 0:
                 print(f"Skipping directory — already processed ({save_dir})")
@@ -297,4 +311,4 @@ if __name__ == "__main__":
             for i, img in enumerate(images):
                 save_path = os.path.join(out_dir, f"{exp_id}_s{i}.png")
                 save_image(img, save_path)
-                print(f"✅ Saved: {save_path}")
+                print(f"✅ Saved: {save_path}",flush=True)

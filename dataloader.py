@@ -17,6 +17,7 @@ class Dataloader:
         
         self.model = None
         self.processor = None
+        self.skipped = 0
 
 
     def safe_load_image(self, path):
@@ -57,6 +58,9 @@ class Dataloader:
 
             for i, entry in enumerate(data):
                 # Skip completed entries
+
+                if i-self.skipped > 300:
+                    break
                 
                 image_url = entry.get("open_image_input_url", "")
                 text_prompt = entry.get("text", "")
@@ -90,6 +94,7 @@ class Dataloader:
 
                 if input_img is None or output_img is None:
                     print(f"⚠️ Skipping entry {i} due to missing image(s).")
+                    self.skipped = self.skipped + 1
                     continue
 
                 # --- 1️⃣ Edit prompt shortener ---
